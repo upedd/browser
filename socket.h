@@ -7,12 +7,29 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
+#include <cstring>
 #include <cerrno>
 #include <unistd.h>
 #include <string_view>
+#include <stdexcept>
+#include <vector>
+#include <ranges>
 
 // #TODO windows support
 // #TODO implement rest of the api
+// #TODO auto conversion to network ints and vice versa
+
+// #FIXME errno
+
+// type aliasing functions to avoid conflicts with member functions
+// #TODO is this good way to create aliases?
+
+static constexpr auto& platform_send = send;
+static constexpr auto& platform_socket = socket;
+static constexpr auto& platform_connect = connect;
+static constexpr auto& platform_recv = recv;
+static constexpr auto& platform_close = close;
+static constexpr auto& platform_getaddrinfo = getaddrinfo;
 
 /**
  * Wrapper for system sockets with utility functions.
@@ -21,7 +38,7 @@
 class Socket {
 public:
     // #TODO check other implementations
-    static constexpr int DEFAULT_MAX_BUFFER_SIZE = 1024;
+    static constexpr std::size_t DEFAULT_MAX_BUFFER_SIZE = 1024;
 
     class Error : public std::runtime_error {
     public:
@@ -42,18 +59,70 @@ public:
         socket.mIsOpen = false;
     };
 
-    void connectSocket(addrinfo *address) const;
+    void connect(addrinfo *address) const;
 
-    void sendString(std::string_view string) const;
+    // #TODO why this needs to be here?
+    template <class T> requires std::ranges::sized_range<T>
+    int64_t send(T&& range, int flags = 0) const {
+        int64_t bytesSend = platform_send(mFileDescriptor, std::ranges::data(range), std::ranges::size(range), flags);
+        if (bytesSend == -1) {
+            throw Socket::Error(strerror(errno));
+        }
+        return bytesSend;
+    };
 
-    void sendBytes(const void *data, size_t length, int flags = 0) const;
+    /**
+     * Utility function. Sends all the data from given range
+     * @tparam T
+     * @param range
+     * @param flags
+     */
+    template <class T> requires std::ranges::sized_range<T>
+    void sendAll(T&& range, int flags = 0) const {
+        int64_t total = 0;
+        int64_t left = std::ranges::size(range);
+        while (total < left) {
+            // this should probably work?
+            int64_t bytesSent = send(std::ranges::subrange(std::ranges::begin(range) + total, std::ranges::end(range)),
+                                     flags);
+            total += bytesSent;
+            left -= bytesSent;
+        }
+    }
 
-    template<typename T>
-    std::vector<T> receive(int maxBufferSize = DEFAULT_MAX_BUFFER_SIZE);
+    template<typename T, std::size_t BUFFER_SIZE = DEFAULT_MAX_BUFFER_SIZE>
+    std::pair<std::array<T, BUFFER_SIZE>, int64_t> receive() {
+        // #TODO flags?
+        std::array<T, BUFFER_SIZE> buffer {};
+        // #FIXME BUFFER_SIZE is dependant on type
+        int64_t bytesReceived = platform_recv(mFileDescriptor, buffer.data(), BUFFER_SIZE, 0);
+        if (bytesReceived == -1) {
+            throw Socket::Error(strerror(errno));
+        }
+        return std::make_pair(buffer, bytesReceived);
+    }
 
-    std::string receiveString(int maxBufferSize = DEFAULT_MAX_BUFFER_SIZE);
+    template<typename T, std::size_t BUFFER_SIZE = DEFAULT_MAX_BUFFER_SIZE>
+    std::vector<T> receiveAll() {
+        std::vector<T> result;
+        while (true) {
+            auto [buffer, bytesReceived] = receive<T, BUFFER_SIZE>();
+            if (bytesReceived > 0) {
+                result.insert(result.end(), buffer.begin(), buffer.begin() + bytesReceived);
+            } else {
+                break;
+            }
+        }
+        return result;
+    }
 
-    void closeSocket();
+    template <std::size_t BUFFER_SIZE = DEFAULT_MAX_BUFFER_SIZE>
+    std::string receiveAllAsString() {
+        auto response = receiveAll<char, BUFFER_SIZE>();
+        return {response.begin(), response.end()};
+    };
+
+    void close();
 
     ~Socket();
 

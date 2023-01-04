@@ -6,7 +6,7 @@
 int errno;
 
 Socket::Socket(int family, int type, int protocol) {
-    mFileDescriptor = socket(family, type, protocol);
+    mFileDescriptor = platform_socket(family, type, protocol);
     if (mFileDescriptor == -1) {
         throw Socket::Error(strerror(errno));
     }
@@ -14,57 +14,16 @@ Socket::Socket(int family, int type, int protocol) {
     mType = type;
 }
 
-void Socket::sendString(std::string_view string) const {
-    sendBytes(string.data(), string.length());
-}
-
-void Socket::sendBytes(const void *data, size_t length, int flags) const {
-    int64_t bytesSend = send(mFileDescriptor, data, length, flags);
-    if (bytesSend == -1) {
-        throw Socket::Error(strerror(errno));
-    }
-    // handle partial sends
-}
-
-template<typename T>
-std::vector<T> Socket::receive(int maxBufferSize) {
-    // #TODO flags?
-    T buffer[maxBufferSize];
-    std::vector<T> result;
-    int64_t bytesReceived;
-    do {
-        // reset buffer to zeros
-        std::fill(buffer, buffer + maxBufferSize, 0);
-        bytesReceived = recv(mFileDescriptor, buffer, maxBufferSize, 0);
-        if (bytesReceived == -1) {
-            // maybe we can return partial results instead of throwing errors.
-            throw Socket::Error(strerror(errno));
-        }
-        // refactor?
-        if (bytesReceived > 0) {
-            result.insert(result.end(), &buffer[0], buffer + bytesReceived);
-        }
-    } while (bytesReceived > 0);
-    return result;
-}
-
-std::string Socket::receiveString(int maxBufferSize) {
-    // performance?
-    std::vector<char> response = receive<char>(maxBufferSize);
-    std::string string (response.begin(), response.end());
-    return string;
-}
-
-void Socket::closeSocket() {
+void Socket::close() {
     // #TODO check for error
     if (mIsOpen) {
-        close(mFileDescriptor);
+        platform_close(mFileDescriptor);
         mIsOpen = false;
     }
 }
 
 Socket::~Socket() {
-    closeSocket();
+    close();
 }
 
 addrinfo* Socket::getAddressInfo(std::string_view address, std::string_view port, int family, int type, int protocol, int flags) {
@@ -79,7 +38,7 @@ addrinfo* Socket::getAddressInfo(std::string_view address, std::string_view port
     };
     addrinfo *response;
 
-    int status = getaddrinfo(address.data(), port.data(), &hints, &response);
+    int status = platform_getaddrinfo(address.data(), port.data(), &hints, &response);
     if (status != 0) {
         throw Socket::Error(gai_strerror(status));
     }
@@ -87,8 +46,8 @@ addrinfo* Socket::getAddressInfo(std::string_view address, std::string_view port
     return response;
 }
 
-void Socket::connectSocket(addrinfo *address) const {
-    int status = connect(mFileDescriptor, address->ai_addr, address->ai_addrlen);
+void Socket::connect(addrinfo *address) const {
+    int status = platform_connect(mFileDescriptor, address->ai_addr, address->ai_addrlen);
     if (status == -1) {
         throw Socket::Error(strerror(errno));
     }
@@ -105,7 +64,7 @@ Socket Socket::createConnection(int type, std::string_view address, std::string_
     for (current = response; current != nullptr; current = current->ai_next) {
         try {
             Socket currentSocket (current->ai_family, current->ai_socktype, current->ai_protocol);
-            currentSocket.connectSocket(current);
+            currentSocket.connect(current);
             // no errors thrown mean we got a connection
             return currentSocket;
         } catch (const Socket::Error& error) {
@@ -115,5 +74,4 @@ Socket Socket::createConnection(int type, std::string_view address, std::string_
     throw Socket::Error("Couldn't create a connection!");
     // free address?
 }
-
 
