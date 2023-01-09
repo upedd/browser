@@ -26,7 +26,7 @@ Socket::~Socket() {
     close();
 }
 
-addrinfo* Socket::getAddressInfo(std::string_view address, std::string_view port, int family, int type, int protocol, int flags) {
+std::vector<Socket::AddressInformation> Socket::getAddressInfo(std::string_view address, std::string_view port, int family, int type, int protocol, int flags) {
     addrinfo hints{flags, // flags
                    family, // family
                    type, // type
@@ -43,11 +43,20 @@ addrinfo* Socket::getAddressInfo(std::string_view address, std::string_view port
         throw Socket::Error(gai_strerror(status));
     }
 
-    return response;
+    std::vector<AddressInformation> addresses;
+
+    // iterate over linked list of address and convert them into our platform independent type
+    addrinfo* current;
+    for (current = response; current != nullptr; current = current->ai_next) {
+        addresses.emplace_back(current);
+    }
+
+    return addresses;
 }
 
-void Socket::connect(addrinfo *address) const {
-    int status = platform_connect(mFileDescriptor, address->ai_addr, address->ai_addrlen);
+void Socket::connect(const Socket::Address& address) const {
+    sockaddr* sockAddr = address.getPlatform();
+    int status = platform_connect(mFileDescriptor, sockAddr, sockAddr->sa_len);
     if (status == -1) {
         throw Socket::Error(strerror(errno));
     }
@@ -58,13 +67,15 @@ Socket Socket::createConnection(int type, std::string_view address, int port) {
 }
 
 Socket Socket::createConnection(int type, std::string_view address, std::string_view port) {
-    addrinfo* response = getAddressInfo(address, port, AF_UNSPEC, type);
-    // iterate over linked list of address and connect to the first one we can.
-    addrinfo* current;
-    for (current = response; current != nullptr; current = current->ai_next) {
+    auto response = getAddressInfo(address, port, AF_UNSPEC, type);
+    for (auto& addressInformation : response) {
         try {
-            Socket currentSocket (current->ai_family, current->ai_socktype, current->ai_protocol);
-            currentSocket.connect(current);
+            Socket currentSocket (
+                    addressInformation.getFamily(),
+                    addressInformation.getType(),
+                    addressInformation.getProtocol()
+                    );
+            currentSocket.connect(addressInformation.getAddress());
             // no errors thrown mean we got a connection
             return currentSocket;
         } catch (const Socket::Error& error) {

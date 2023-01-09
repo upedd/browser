@@ -37,6 +37,66 @@ static constexpr auto& platform_getaddrinfo = getaddrinfo;
  */
 class Socket {
 public:
+
+    class Address {
+    public:
+        explicit Address(sockaddr *sockAddr) : mSockAddr(sockAddr) {};
+
+        [[nodiscard]] sockaddr* getPlatform() const {
+            return mSockAddr;
+        }
+    private:
+        sockaddr* mSockAddr;
+    };
+
+    class AddressInformation {
+
+    public:
+        explicit AddressInformation(addrinfo* addrInfo) : mAddrInfo(addrInfo), mAddress(addrInfo->ai_addr) {};
+
+        // disable copying
+        AddressInformation(const AddressInformation& addressInformation) = delete;
+        AddressInformation& operator=(const AddressInformation &) = delete;
+
+        // move constructor
+        AddressInformation(AddressInformation &&addressInformation) noexcept : mAddrInfo(addressInformation.mAddrInfo),
+                                                                               mAddress(addressInformation.mAddress) {
+            addressInformation.mAddrInfo = nullptr;
+        }
+
+        ~AddressInformation() {
+            if (mAddrInfo) {
+                // #TODO why?
+                mAddrInfo->ai_next = nullptr;
+                freeaddrinfo(mAddrInfo);
+            }
+        }
+
+        [[nodiscard]] int getFamily() const {
+            return mAddrInfo->ai_family;
+        }
+
+        [[nodiscard]] int getType() const {
+            return mAddrInfo->ai_socktype;
+        }
+
+        [[nodiscard]] int getProtocol() const {
+            return mAddrInfo->ai_protocol;
+        }
+
+        [[nodiscard]] const char* getCanonicalName() const {
+            return mAddrInfo->ai_canonname;
+        }
+
+        [[nodiscard]] const Address &getAddress() const {
+            return mAddress;
+        }
+
+    private:
+        addrinfo* mAddrInfo;
+        Address mAddress;
+    };
+
     // #TODO check other implementations
     static constexpr std::size_t DEFAULT_MAX_BUFFER_SIZE = 1024;
 
@@ -59,7 +119,7 @@ public:
         socket.mIsOpen = false;
     };
 
-    void connect(addrinfo *address) const;
+    void connect(const Socket::Address& address) const;
 
     // #TODO why this needs to be here?
     template <class T> requires std::ranges::sized_range<T>
@@ -126,8 +186,7 @@ public:
 
     ~Socket();
 
-    // #TODO change address info to platform independent type
-    static addrinfo *
+    static std::vector<AddressInformation>
     getAddressInfo(std::string_view address, std::string_view port, int family = 0, int type = 0, int protocol = 0,
                    int flags = 0);
 
