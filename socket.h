@@ -30,6 +30,11 @@ static constexpr auto& platform_connect = connect;
 static constexpr auto& platform_recv = recv;
 static constexpr auto& platform_close = close;
 static constexpr auto& platform_getaddrinfo = getaddrinfo;
+static constexpr auto& platform_bind = bind;
+static constexpr auto& platform_listen = listen;
+static constexpr auto& platform_accept = accept;
+static constexpr auto& platform_setsockopt = setsockopt;
+static constexpr auto& platform_getsockopt = getsockopt;
 
 /**
  * Wrapper for system sockets with utility functions.
@@ -38,15 +43,54 @@ static constexpr auto& platform_getaddrinfo = getaddrinfo;
 class Socket {
 public:
 
+    // maybe separate to owning and not owning address?
     class Address {
     public:
-        explicit Address(sockaddr *sockAddr) : mSockAddr(sockAddr) {};
+        explicit Address(sockaddr *sockAddr) : mSockAddr(sockAddr), owner(false) {};
+        Address() {
+            owner = true;
+            mSockAddr = new sockaddr();
+        }
+
+        // disable copying
+        Address(const Address& addressInformation) = delete;
+        Address& operator=(const Address &) = delete;
+
+        // move constructor
+        Address(Address &&address) noexcept : mSockAddr(address.mSockAddr), owner(address.owner) {
+            address.owner = false;
+        }
+
+        ~Address() {
+            if (owner) {
+                delete mSockAddr;
+            }
+        };
+
+        std::string toString() {
+            // #TODO refactor
+            // only callable for inet addresses
+            // change size depending on family?
+            if (mSockAddr->sa_family == AF_INET6) {
+                char result[INET6_ADDRSTRLEN];
+                inet_ntop(mSockAddr->sa_family, mSockAddr, result, INET6_ADDRSTRLEN);
+                return {result};
+            } else if (mSockAddr->sa_family == AF_INET) {
+                char result[INET_ADDRSTRLEN];
+                inet_ntop(mSockAddr->sa_family, mSockAddr, result, INET_ADDRSTRLEN);
+                return {result};
+            } else {
+                // throw
+            }
+        }
 
         [[nodiscard]] sockaddr* getPlatform() const {
             return mSockAddr;
         }
     private:
         sockaddr* mSockAddr;
+        // is this object responsible for deleting sock addr?
+        bool owner;
     };
 
     class AddressInformation {
@@ -60,7 +104,7 @@ public:
 
         // move constructor
         AddressInformation(AddressInformation &&addressInformation) noexcept : mAddrInfo(addressInformation.mAddrInfo),
-                                                                               mAddress(addressInformation.mAddress) {
+                                                                               mAddress(std::move(addressInformation.mAddress)) {
             addressInformation.mAddrInfo = nullptr;
         }
 
@@ -105,7 +149,9 @@ public:
         explicit Error(const char *error) : std::runtime_error(error) {};
     };
 
-    explicit Socket(int family, int type, int protocol = 0);
+    // temp fix protocol should be defaulted to 0
+    Socket(int fileDescriptor, int family, int type, int protocol) : mFileDescriptor(fileDescriptor), mFamily(family), mType(type), mProtocol(protocol) {};
+    Socket(int family, int type, int protocol);
 
     // disable copying
     Socket(const Socket &socket) = delete;
@@ -114,12 +160,28 @@ public:
 
     // move constructor
     Socket(Socket &&socket) noexcept: mIsOpen(socket.mIsOpen), mFileDescriptor(socket.mFileDescriptor),
-                                      mType(socket.mType), mFamily(socket.mFamily) {
+                                      mType(socket.mType), mFamily(socket.mFamily), mProtocol(socket.mProtocol) {
         socket.mFileDescriptor = -1;
         socket.mIsOpen = false;
     };
 
     void connect(const Socket::Address& address) const;
+
+    void bind(const Socket::Address& address) const;
+
+    void listen(int maxBacklog = 128) const;
+
+    [[nodiscard]] std::pair<Socket, Socket::Address> accept() const;
+
+    template<typename T>
+    void setOption(int option, T value) {
+        int status = platform_setsockopt(mFileDescriptor, SOL_SOCKET, option, &value, sizeof(T));
+        if (status == -1) {
+            throw Socket::Error(strerror(errno));
+        }
+    }
+
+    // #TODO get option
 
     // #TODO why this needs to be here?
     template <class T> requires std::ranges::sized_range<T>
@@ -194,11 +256,15 @@ public:
 
     static Socket createConnection(int type, std::string_view address, std::string_view port);
 
+    // default value for backlog?
+    static Socket createServer(std::string_view address, std::string_view port, int family = AF_INET, int type = SOCK_STREAM, bool reusePort = false, bool dualStackIpv6 = false);
+
 private:
     bool mIsOpen = true;
     int mFileDescriptor;
     int mFamily;
     int mType;
+    int mProtocol;
 };
 
 #endif //BROWSER_SOCKET_H

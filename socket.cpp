@@ -12,6 +12,7 @@ Socket::Socket(int family, int type, int protocol) {
     }
     mFamily = family;
     mType = type;
+    mProtocol = protocol;
 }
 
 void Socket::close() {
@@ -84,5 +85,62 @@ Socket Socket::createConnection(int type, std::string_view address, std::string_
     }
     throw Socket::Error("Couldn't create a connection!");
     // free address?
+}
+
+void Socket::bind(const Socket::Address &address) const {
+    sockaddr* sockAddr = address.getPlatform();
+    int status = platform_bind(mFileDescriptor, sockAddr, sockAddr->sa_len);
+    if (status == -1) {
+        throw Socket::Error(strerror(errno));
+    }
+}
+
+void Socket::listen(int maxBacklog) const {
+    int status = platform_listen(mFileDescriptor, maxBacklog);
+
+    if (status == -1) {
+        throw Socket::Error(strerror(errno));
+    }
+}
+
+std::pair<Socket, Socket::Address> Socket::accept() const {
+    Socket::Address address;
+    sockaddr* sockAddr = address.getPlatform();
+    socklen_t sockAddrSize = sizeof(*sockAddr);
+    int socketFileDescriptor = platform_accept(mFileDescriptor, sockAddr, &sockAddrSize);
+
+    if (socketFileDescriptor == -1) {
+        throw Socket::Error(strerror(errno));
+    }
+
+    Socket newSocket (socketFileDescriptor, mFamily, mType, mProtocol);
+
+    return {std::move(newSocket), std::move(address)};
+}
+
+Socket
+Socket::createServer(std::string_view address, std::string_view port, int family, int type, bool reusePort,
+                     bool dualStackIpv6) {
+    // #TODO dual stack
+
+    auto addresses = Socket::getAddressInfo(address, port, family, type, 0, AI_PASSIVE);
+
+    for (auto& addressInfo : addresses) {
+        try {
+            Socket socket {addressInfo.getFamily(), addressInfo.getType(), addressInfo.getProtocol()};
+
+            if (reusePort) {
+                socket.setOption(SO_REUSEADDR, 1);
+            }
+
+            socket.bind(addressInfo.getAddress());
+            // no errors mean we got successfully bound socket
+            return socket;
+        } catch (const Socket::Error& error) {
+            // debug log?
+        }
+    }
+
+    throw Socket::Error("Failed to bind");
 }
 
