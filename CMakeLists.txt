@@ -3,4 +3,4 @@ project(browser)
 
 set(CMAKE_CXX_STANDARD 20)
 
-add_executable(browser main.cpp socket.h socket.cpp)
+add_executable(browser socket.h main.cpp)
