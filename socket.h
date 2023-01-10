@@ -22,19 +22,17 @@
 // #FIXME errno
 
 // type aliasing functions to avoid conflicts with member functions
-// #TODO is this good way to create aliases?
-
-static constexpr auto& platform_send = send;
-static constexpr auto& platform_socket = socket;
-static constexpr auto& platform_connect = connect;
-static constexpr auto& platform_recv = recv;
-static constexpr auto& platform_close = close;
-static constexpr auto& platform_getaddrinfo = getaddrinfo;
-static constexpr auto& platform_bind = bind;
-static constexpr auto& platform_listen = listen;
-static constexpr auto& platform_accept = accept;
-static constexpr auto& platform_setsockopt = setsockopt;
-static constexpr auto& platform_getsockopt = getsockopt;
+static constexpr auto platform_send = send;
+static constexpr auto platform_socket = socket;
+static constexpr auto platform_connect = connect;
+static constexpr auto platform_recv = recv;
+static constexpr auto platform_close = close;
+static constexpr auto platform_getaddrinfo = getaddrinfo;
+static constexpr auto platform_bind = bind;
+static constexpr auto platform_listen = listen;
+static constexpr auto platform_accept = accept;
+static constexpr auto platform_setsockopt = setsockopt;
+static constexpr auto platform_getsockopt = getsockopt;
 
 /**
  * Wrapper for system sockets with utility functions.
