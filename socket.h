@@ -107,12 +107,16 @@ public:
             return {result};
         }
 
-        [[nodiscard]] sockaddr_storage* getSockStorage() const {
+        [[nodiscard]] sockaddr_storage *getSockStorage() const {
             return storage;
         }
 
-        [[nodiscard]] sockaddr *getSockAddr() const {
+        [[nodiscard]] sockaddr *get_ptr() const {
             return reinterpret_cast<sockaddr *>(storage);
+        }
+
+        [[nodiscard]] uint8_t get_size() const {
+            return storage->ss_len;
         }
 
         std::variant<sockaddr_in *, sockaddr_in6 *> getAsInternet() {
@@ -216,32 +220,49 @@ public:
 
     ~Socket();
 
-    /*
-     * [Section] Standard Socket Functions
-     */
-
     void bind(const Socket::Address &address) const;
 
     void connect(const Socket::Address &address) const;
 
     // default max backlog?
-    void listen(int maxBacklog = 128) const;
+    void listen(int maxBacklog = 10) const;
 
     [[nodiscard]] std::pair<Socket, Socket::Address> accept() const;
 
-    template<class T>
+    template<typename T>
     requires std::ranges::sized_range<T>
     int64_t send(const T &range, int flags = 0) const;
 
-    template<class T>
+    template<typename T>
     requires std::ranges::sized_range<T>
-    int64_t send(const Socket::Address* address, const T &range, int flags = 0) const;
+    int64_t send_to(const Socket::Address &address, const T &range, int flags = 0) const;
 
-    template<class T>
-    std::vector<T> receive(const Socket::Address* address, int bufferSize = DEFAULT_MAX_BUFFER_SIZE, int flags = 0);
+    template<typename T>
+    requires std::ranges::sized_range<T>
+    void send_all(const T &range, int flags = 0) const;
 
-    template<class T>
-    std::vector<T> receive(int bufferSize = DEFAULT_MAX_BUFFER_SIZE, int flags = 0);
+    template<typename T>
+    requires std::ranges::sized_range<T>
+    void send_all_to(const Socket::Address &address, const T &range, int flags = 0) const;
+
+    template<typename T>
+    std::vector<T> receive(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const;
+
+    template<typename T, size_t size>
+    int64_t receive_into(const std::array<T, size> &buffer, int flags) const;
+
+    template<typename T>
+    std::pair<Address, std::vector<T>> receive_from(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const;
+
+    template<typename T, size_t size>
+    std::pair<Address, int64_t> receive_from_into(const std::array<T, size> &buffer, int flags) const;
+
+    template<typename T>
+    std::vector<T> receive_to_end(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const;
+
+    template<typename T>
+    std::pair<Address, std::vector<T>>
+    receive_to_end_from(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const;
 
     void close();
 
@@ -268,22 +289,6 @@ public:
     };
 
     static NameInfo getNameInfo(const Socket::Address &address, int flags = 0);
-
-    /*
-     * [Section] Utility Functions
-     */
-
-    template<class T>
-    requires std::ranges::sized_range<T>
-    void sendAll(const T &range, int flags = 0) const;
-
-    template<typename T>
-    std::vector<T> receiveAll(const Socket::Address* address, int bufferSize = DEFAULT_MAX_BUFFER_SIZE, int flags = 0);
-
-    template<typename T>
-    std::vector<T> receiveAll(int bufferSize = DEFAULT_MAX_BUFFER_SIZE, int flags = 0);
-
-    std::string receiveAllAsString(int bufferSize = DEFAULT_MAX_BUFFER_SIZE, int flags = 0);
 
     static Socket createConnection(int type, std::string_view address, int port);
 
@@ -315,7 +320,7 @@ inline Socket::~Socket() {
 }
 
 inline void Socket::bind(const Socket::Address &address) const {
-    sockaddr *sockAddr = address.getSockAddr();
+    sockaddr *sockAddr = address.get_ptr();
     int status = platform_bind(mFileDescriptor, sockAddr, sockAddr->sa_len);
     if (status == -1) {
         throw Socket::Error(strerror(errno));
@@ -323,7 +328,7 @@ inline void Socket::bind(const Socket::Address &address) const {
 }
 
 inline void Socket::connect(const Socket::Address &address) const {
-    sockaddr *sockAddr = address.getSockAddr();
+    sockaddr *sockAddr = address.get_ptr();
     int status = platform_connect(mFileDescriptor, sockAddr, sockAddr->sa_len);
     if (status == -1) {
         throw Socket::Error(strerror(errno));
@@ -340,7 +345,7 @@ inline void Socket::listen(int maxBacklog) const {
 
 inline std::pair<Socket, Socket::Address> Socket::accept() const {
     Socket::Address address;
-    sockaddr *sockAddr = address.getSockAddr();
+    sockaddr *sockAddr = address.get_ptr();
     // we get and pass size of a sockaddr_storage type instead of sockaddr
     // as the sockaddr is stored as sockaddr_storage in Socket::Address
     // and to support properly storing ipv6 which requires more storage
@@ -357,31 +362,169 @@ inline std::pair<Socket, Socket::Address> Socket::accept() const {
     return {std::move(newSocket), std::move(address)};
 }
 
-template<class T>
+template<typename T>
 requires std::ranges::sized_range<T>
-inline int64_t Socket::send(const T &range, int flags) const {
-    return send(nullptr, range, flags);
+int64_t Socket::send(const T &range, int flags) const {
+    auto data = std::ranges::data(range);
+    uint32_t data_size = std::ranges::size(range);
+
+    int bytesSent = platform_send(mFileDescriptor, data, data_size, flags);
+    if (bytesSent == -1) {
+        throw Socket::Error(strerror(errno));
+    }
+    return bytesSent;
 }
 
 template<typename T>
-inline std::vector<T> Socket::receive(const Socket::Address* address, int bufferSize, int flags) {
-    std::vector<T> buffer{};
-    buffer.resize(bufferSize);
-    // #FIXME BUFFER_SIZE is dependant on type
-    int64_t bytesReceived;
-    if (address) {
-        sockaddr_storage* storage = address->getSockStorage();
-        socklen_t storageSize = sizeof(sockaddr_storage);
-        bytesReceived = platform_recvfrom(mFileDescriptor, buffer.data(), bufferSize, flags,
-                                          reinterpret_cast<sockaddr *>(storage), &storageSize);
-    } else {
-        bytesReceived = platform_recv(mFileDescriptor, buffer.data(), bufferSize, flags);
-    }
-    if (bytesReceived == -1) {
+requires std::ranges::sized_range<T>
+int64_t Socket::send_to(const Socket::Address &address, const T &range, int flags) const {
+    auto data = std::ranges::data(range);
+    uint32_t data_size = std::ranges::size(range);
+
+    int bytes_sent = platform_sendto(mFileDescriptor, data, data_size, flags, address.get_ptr(), address.get_size());
+    if (bytes_sent == -1) {
         throw Socket::Error(strerror(errno));
     }
-    buffer.resize(bytesReceived);
+    return bytes_sent;
+}
+
+
+template<typename T>
+requires std::ranges::sized_range<T>
+void Socket::send_all(const T &range, int flags) const {
+    auto begin_iter = std::ranges::begin(range);
+    auto end_iter = std::ranges::end(range);
+
+    int64_t total_bytes_sent = 0;
+    int64_t bytes_left = std::ranges::size(range);
+
+    while (total_bytes_sent < bytes_left) {
+        int64_t bytes_sent = send(std::ranges::subrange(begin_iter + total_bytes_sent, end_iter), flags);
+        total_bytes_sent += bytes_sent;
+        bytes_left -= bytes_sent;
+    }
+}
+
+template<typename T>
+requires std::ranges::sized_range<T>
+void Socket::send_all_to(const Socket::Address &address, const T &range, int flags) const {
+    auto begin_iter = std::ranges::begin(range);
+    auto end_iter = std::ranges::end(range);
+
+    int64_t total_bytes_sent = 0;
+    int64_t bytes_left = std::ranges::size(range);
+
+    while (total_bytes_sent < bytes_left) {
+        int64_t bytes_sent = send_to(address, std::ranges::subrange(begin_iter + total_bytes_sent, end_iter), flags);
+        total_bytes_sent += bytes_sent;
+        bytes_left -= bytes_sent;
+    }
+}
+
+template<typename T>
+std::vector<T> Socket::receive(int buffer_size, int flags) const {
+    std::vector<T> buffer{};
+    buffer.resize(buffer_size);
+
+    size_t buffer_size_in_bytes = buffer_size * sizeof(T);
+    int bytes_received = platform_recv(mFileDescriptor, buffer.data(), buffer_size_in_bytes, flags);
+
+    if (bytes_received == -1) {
+        throw Socket::Error(strerror(errno));
+    }
+
+    // shrink buffer vector to only fit elements we received
+    size_t num_of_elements_received = bytes_received / sizeof(T);
+    buffer.resize(num_of_elements_received);
     return buffer;
+}
+
+
+template<typename T, size_t size>
+int64_t Socket::receive_into(const std::array<T, size> &buffer, int flags) const {
+    constexpr size_t buffer_size_in_bytes = size * sizeof(T);
+    int bytes_received = platform_recv(mFileDescriptor, buffer.data(), buffer_size_in_bytes, flags);
+    if (bytes_received == -1) {
+        throw Socket::Error(strerror(errno));
+    }
+    // return num of elements we received
+    return bytes_received / sizeof(T);
+}
+
+template<typename T>
+std::pair<Socket::Address, std::vector<T>> Socket::receive_from(int buffer_size, int flags) const {
+    Address address {};
+    std::vector<T> buffer{};
+    buffer.resize(buffer_size);
+
+    size_t buffer_size_in_bytes = buffer_size * sizeof(T);
+    // sockaddr_storage instead of sockaddr so we can receive ipv6 addresses
+    socklen_t sock_length = sizeof(sockaddr_storage);
+
+    int bytes_received = platform_recvfrom(mFileDescriptor, buffer.data(), buffer_size_in_bytes, flags, address.get_ptr(), &sock_length);
+
+    if (bytes_received == -1) {
+        throw Socket::Error(strerror(errno));
+    }
+
+    // shrink buffer vector to only fit elements we received
+    size_t num_of_elements_received = bytes_received / sizeof(T);
+    buffer.resize(num_of_elements_received);
+
+    return std::make_pair(std::move(address), std::move(buffer));
+}
+
+
+template<typename T, size_t size>
+std::pair<Socket::Address, int64_t> Socket::receive_from_into(const std::array<T, size> &buffer, int flags) const {
+    constexpr size_t buffer_size_in_bytes = size * sizeof(T);
+
+    Socket::Address address {};
+    // sockaddr_storage instead of sockaddr so we can receive ipv6 addresses
+    socklen_t sock_length = sizeof(sockaddr_storage);
+
+    int bytes_received = platform_recv_from(mFileDescriptor, buffer.data(), buffer_size_in_bytes, flags, address.get_ptr(), &sock_length);
+    if (bytes_received == -1) {
+        throw Socket::Error(strerror(errno));
+    }
+
+    size_t num_of_elements_received = bytes_received / sizeof(T);
+
+    return std::make_pair(std::move(address), num_of_elements_received);
+}
+
+template<typename T>
+std::vector<T> Socket::receive_to_end(int buffer_size, int flags) const {
+    std::vector<T> result_buffer;
+    while (true) {
+        auto buffer = receive<T>(buffer_size, flags);
+        // we receive until we get an empty buffer which means there so more data to read
+        if (buffer.size() > 0) {
+            result_buffer.insert(result_buffer.end(), buffer.begin(), buffer.end());
+        } else {
+            break;
+        }
+    }
+    return result_buffer;
+}
+
+template<typename T>
+std::pair<Socket::Address, std::vector<T>> Socket::receive_to_end_from(int buffer_size, int flags) const {
+    std::vector<T> result_buffer;
+    Socket::Address last_address;
+    while (true) {
+        auto [buffer, address] = receive<T>(buffer_size, flags);
+        // we receive until we get an empty buffer which means there so more data to read
+        if (buffer.size() > 0) {
+            result_buffer.insert(result_buffer.end(), buffer.begin(), buffer.end());
+            // we will return the last address we got data from
+            last_address = address;
+        } else {
+            break;
+        }
+    }
+
+    return std::make_pair(std::move(last_address), std::move(result_buffer));
 }
 
 inline void Socket::close() {
@@ -427,30 +570,6 @@ Socket::getAddressInfo(std::string_view address, std::string_view port, int fami
     }
 
     return addresses;
-}
-
-template<class T>
-requires std::ranges::sized_range<T>
-inline void Socket::sendAll(const T &range, int flags) const {
-    int64_t total = 0;
-    int64_t left = std::ranges::size(range);
-    while (total < left) {
-        // this should probably work?
-        int64_t bytesSent = send(std::ranges::subrange(std::ranges::begin(range) + total, std::ranges::end(range)),
-                                 flags);
-        total += bytesSent;
-        left -= bytesSent;
-    }
-}
-
-template<typename T>
-inline std::vector<T> Socket::receiveAll(int bufferSize, int flags) {
-    return receiveAll<T>(nullptr, bufferSize, flags);
-}
-
-inline std::string Socket::receiveAllAsString(int bufferSize, int flags) {
-    auto response = receiveAll<char>(bufferSize, flags);
-    return {response.begin(), response.end()};
 }
 
 inline Socket Socket::createConnection(int type, std::string_view address, int port) {
@@ -505,7 +624,7 @@ Socket::createServer(std::string_view address, std::string_view port, int family
 inline Socket::NameInfo Socket::getNameInfo(const Socket::Address &address, int flags) {
     char host[1024];
     char service[20];
-    sockaddr *addr = address.getSockAddr();
+    sockaddr *addr = address.get_ptr();
 
     int status = platform_getnameinfo(addr, sizeof(*addr), host, sizeof(host), service, sizeof(service), flags);
     if (status == -1) {
@@ -517,7 +636,7 @@ inline Socket::NameInfo Socket::getNameInfo(const Socket::Address &address, int 
 
 inline Socket::Address Socket::getPeerName() const {
     Socket::Address address{};
-    sockaddr *addr = address.getSockAddr();
+    sockaddr *addr = address.get_ptr();
     socklen_t addrSize = sizeof(*addr);
     int status = platform_getpeername(mFileDescriptor, addr, &addrSize);
     if (status == -1) {
@@ -527,43 +646,6 @@ inline Socket::Address Socket::getPeerName() const {
     return address;
 }
 
-template<class T>
-requires std::ranges::sized_range<T>
-int64_t Socket::send(const Socket::Address* address, const T &range, int flags) const {
 
-    auto data = std::ranges::data(range);
-    uint32_t size = std::ranges::size(range);
 
-    int bytesSent;
-    if (address) {
-        const sockaddr *sockAddr = address->getSockAddr();
-        bytesSent = platform_sendto(mFileDescriptor, data, size, flags, sockAddr, sockAddr->sa_len);
-    } else {
-        bytesSent = platform_send(mFileDescriptor, data, size, flags);
-    }
-
-    if (bytesSent == -1) {
-        throw Socket::Error(strerror(errno));
-    }
-    return bytesSent;
-}
-
-template<typename T>
-std::vector<T> Socket::receiveAll(const Socket::Address *address, int bufferSize, int flags) {
-    std::vector<T> result;
-    while (true) {
-        auto buffer = receive<T>(address, bufferSize, flags);
-        if (buffer.size() > 0) {
-            result.insert(result.end(), buffer.begin(), buffer.end());
-        } else {
-            break;
-        }
-    }
-    return result;
-}
-
-template<class T>
-inline std::vector<T> Socket::receive(int bufferSize, int flags) {
-    return receive<T>(nullptr, bufferSize, flags);
-}
 #endif //BROWSER_SOCKET_H
