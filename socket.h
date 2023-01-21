@@ -17,6 +17,7 @@
 #include <ranges>
 #include <utility>
 #include <variant>
+#include <memory>
 
 // #TODO is it correct?
 #include "cerrno"
@@ -51,94 +52,135 @@ static constexpr auto platform_sendto = sendto;
  */
 class Socket {
 public:
+    class Address;
+    class InternetAddress;
+    class InternetAddressV4;
+    class InternetAddressV6;
+
+    // #TODO more getters and setters for internet addresses.
+
     class Address {
     public:
-        explicit Address(sockaddr *sockAddr) : storage(reinterpret_cast<sockaddr_storage *>(sockAddr)),
-                                               mIsOwning(false) {};
+        Address() : m_storage(new sockaddr_storage), m_is_owner(true) {};
 
-        Address(int family, std::string_view address) : Address(family) {
-            int status = 0;
-            std::variant<sockaddr_in *, sockaddr_in6 *> inetAddress = getAsInternet();
-            // we have to support both ipv4 and ipv6 variants
-            if (sockaddr_in **ipv4 = std::get_if<sockaddr_in *>(&inetAddress)) {
-                status = platform_pton(family, address.data(), &(*ipv4)->sin_addr);
-            } else if (sockaddr_in6 **ipv6 = std::get_if<sockaddr_in6 *>(&inetAddress)) {
-                status = platform_pton(family, address.data(), &(*ipv6)->sin6_addr);
+        explicit Address(sockaddr_storage *storage, bool transfer_ownership = false) : m_storage(storage), m_is_owner(
+                transfer_ownership) {};
+
+        explicit Address(sockaddr *storage, bool transfer_ownership = false) : Address(
+                reinterpret_cast<sockaddr_storage *>(storage), transfer_ownership) {};
+
+        // #TODO copying
+        Address(const Address &address) = delete;
+
+        Address &operator=(const Address &) = delete;
+
+        Address(Address &&address) noexcept: m_storage(std::exchange(address.m_storage, nullptr)),
+                                             m_is_owner(std::exchange(address.m_is_owner, false)) {}
+
+        [[nodiscard]] sockaddr *get_ptr() const {
+            return reinterpret_cast<sockaddr *>(m_storage);
+        }
+
+        [[nodiscard]] socklen_t get_ptr_length() const {
+            return m_storage->ss_len;
+        }
+
+        [[nodiscard]] uint8_t get_family() const {
+            return m_storage->ss_family;
+        }
+
+        [[nodiscard]] std::unique_ptr<InternetAddress> get_as_inet() const {
+            if (get_family() == AF_INET) {
+                return get_as_v4();
+            } else if (get_family() == AF_INET6) {
+                return get_as_v6();
             }
+            return {};
+        };
+
+        [[nodiscard]] std::unique_ptr<InternetAddressV4> get_as_v4() const {
+            if (get_family() == AF_INET) {
+                return std::make_unique<InternetAddressV4>(get_ptr());
+            }
+            return {};
+        };
+
+        [[nodiscard]] std::unique_ptr<InternetAddressV6> get_as_v6() const {
+            if (get_family() == AF_INET6) {
+                return std::make_unique<InternetAddressV6>(get_ptr());
+            }
+            return {};
+        };
+
+        ~Address() {
+            if (m_is_owner) {
+                delete m_storage;
+            }
+        }
+    private:
+        sockaddr_storage *m_storage;
+        bool m_is_owner;
+    };
+
+    class InternetAddress : public Address {
+    public:
+        using Address::Address;
+
+        virtual std::string get_as_string() = 0;
+
+        // #TODO investigate destruction
+        virtual ~InternetAddress() = default;
+    };
+
+    class InternetAddressV4 : public InternetAddress {
+    public:
+        using InternetAddress::InternetAddress;
+
+        InternetAddressV4(std::string_view address, uint16_t port) : InternetAddress() {
+            sockaddr_in* inet_ptr = get_inet_ptr();
+            inet_ptr->sin_port = port;
+            int status = platform_pton(AF_INET, address.data(), &inet_ptr->sin_addr);
+
             if (status == -1) {
                 throw Socket::Error(strerror(errno));
             }
         }
 
-        explicit Address(int family) : Address() {
-            storage->ss_family = family;
+        std::string get_as_string() override {
+            char buffer[INET_ADDRSTRLEN];
+            platform_ntop(AF_INET, &get_inet_ptr()->sin_addr, buffer, INET_ADDRSTRLEN);
+            return { buffer };
         }
 
-        Address() {
-            mIsOwning = true;
-            storage = new sockaddr_storage();
+        [[nodiscard]] sockaddr_in* get_inet_ptr() const {
+            return reinterpret_cast<sockaddr_in*>(get_ptr());
         }
-
-        // disable copying
-        Address(const Address &addressInformation) = delete;
-
-        Address &operator=(const Address &) = delete;
-
-        // move constructor
-        Address(Address &&address) noexcept: storage(std::exchange(address.storage, nullptr)),
-                                             mIsOwning(std::exchange(address.mIsOwning, false)) {}
-
-        ~Address() {
-            if (isOwning() && storage) {
-                delete storage;
-            }
-        };
-
-        std::string toString() {
-            char result[INET6_ADDRSTRLEN];
-
-            std::variant<sockaddr_in *, sockaddr_in6 *> inetAddress = getAsInternet();
-            if (sockaddr_in **ipv4 = std::get_if<sockaddr_in *>(&inetAddress)) {
-                inet_ntop(AF_INET, &(*ipv4)->sin_addr, result, INET6_ADDRSTRLEN);
-            } else if (sockaddr_in6 **ipv6 = std::get_if<sockaddr_in6 *>(&inetAddress)) {
-                inet_ntop(AF_INET6, &(*ipv6)->sin6_addr, result, INET6_ADDRSTRLEN);
-            }
-
-            return {result};
-        }
-
-        [[nodiscard]] sockaddr_storage *getSockStorage() const {
-            return storage;
-        }
-
-        [[nodiscard]] sockaddr *get_ptr() const {
-            return reinterpret_cast<sockaddr *>(storage);
-        }
-
-        [[nodiscard]] uint8_t get_size() const {
-            return storage->ss_len;
-        }
-
-        std::variant<sockaddr_in *, sockaddr_in6 *> getAsInternet() {
-            if (storage->ss_family == AF_INET) {
-                return reinterpret_cast<sockaddr_in *>(storage);
-            } else if (storage->ss_family == AF_INET6) {
-                return reinterpret_cast<sockaddr_in6 *>(storage);
-            }
-            throw Socket::Error(
-                    "Can't get an address as a internet address pointer for family other than AF_INET or AF_INET6");
-        }
-
-        [[nodiscard]] bool isOwning() const {
-            return mIsOwning;
-        }
-
-    private:
-        sockaddr_storage *storage;
-        // determines if this is object is responsible for deleting mSockAddr
-        bool mIsOwning;
     };
 
+    class InternetAddressV6 : public InternetAddress {
+    public:
+        using InternetAddress::InternetAddress;
+
+        InternetAddressV6(std::string_view address, uint16_t port) : InternetAddress() {
+            sockaddr_in6* inet6_ptr = get_inet6_ptr();
+            inet6_ptr->sin6_port = port;
+            int status = platform_pton(AF_INET6, address.data(), &inet6_ptr->sin6_addr);
+
+            if (status == -1) {
+                throw Socket::Error(strerror(errno));
+            }
+        }
+
+        std::string get_as_string() override {
+            char buffer[INET6_ADDRSTRLEN];
+            platform_ntop(AF_INET6, &get_inet6_ptr()->sin6_addr, buffer, INET6_ADDRSTRLEN);
+            return { buffer };
+        }
+
+        [[nodiscard]] sockaddr_in6* get_inet6_ptr() const {
+            return reinterpret_cast<sockaddr_in6*>(get_ptr());
+        }
+    };
     /**
      * Wrapper around addrinfo pointer.
      * Stores information about only one address info, and not linked list of addresses like addrinfo struct.
@@ -381,7 +423,8 @@ int64_t Socket::send_to(const Socket::Address &address, const T &range, int flag
     auto data = std::ranges::data(range);
     uint32_t data_size = std::ranges::size(range);
 
-    int bytes_sent = platform_sendto(mFileDescriptor, data, data_size, flags, address.get_ptr(), address.get_size());
+    int bytes_sent = platform_sendto(mFileDescriptor, data, data_size, flags, address.get_ptr(),
+                                     address.get_ptr_length());
     if (bytes_sent == -1) {
         throw Socket::Error(strerror(errno));
     }
@@ -453,7 +496,7 @@ int64_t Socket::receive_into(const std::array<T, size> &buffer, int flags) const
 
 template<typename T>
 std::pair<Socket::Address, std::vector<T>> Socket::receive_from(int buffer_size, int flags) const {
-    Address address {};
+    Address address{};
     std::vector<T> buffer{};
     buffer.resize(buffer_size);
 
@@ -461,7 +504,8 @@ std::pair<Socket::Address, std::vector<T>> Socket::receive_from(int buffer_size,
     // sockaddr_storage instead of sockaddr so we can receive ipv6 addresses
     socklen_t sock_length = sizeof(sockaddr_storage);
 
-    int bytes_received = platform_recvfrom(mFileDescriptor, buffer.data(), buffer_size_in_bytes, flags, address.get_ptr(), &sock_length);
+    int bytes_received = platform_recvfrom(mFileDescriptor, buffer.data(), buffer_size_in_bytes, flags,
+                                           address.get_ptr(), &sock_length);
 
     if (bytes_received == -1) {
         throw Socket::Error(strerror(errno));
@@ -479,11 +523,12 @@ template<typename T, size_t size>
 std::pair<Socket::Address, int64_t> Socket::receive_from_into(const std::array<T, size> &buffer, int flags) const {
     constexpr size_t buffer_size_in_bytes = size * sizeof(T);
 
-    Socket::Address address {};
+    Socket::Address address{};
     // sockaddr_storage instead of sockaddr so we can receive ipv6 addresses
     socklen_t sock_length = sizeof(sockaddr_storage);
 
-    int bytes_received = platform_recv_from(mFileDescriptor, buffer.data(), buffer_size_in_bytes, flags, address.get_ptr(), &sock_length);
+    int bytes_received = platform_recv_from(mFileDescriptor, buffer.data(), buffer_size_in_bytes, flags,
+                                            address.get_ptr(), &sock_length);
     if (bytes_received == -1) {
         throw Socket::Error(strerror(errno));
     }
@@ -645,7 +690,6 @@ inline Socket::Address Socket::getPeerName() const {
 
     return address;
 }
-
 
 
 #endif //BROWSER_SOCKET_H
