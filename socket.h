@@ -18,6 +18,7 @@
 #include <utility>
 #include <variant>
 #include <memory>
+#include <expected>
 
 // #TODO is it correct?
 #include "cerrno"
@@ -26,6 +27,10 @@ int errno;
 
 // #TODO windows support
 // #TODO support for msghdr?
+// refactor address
+// refactor errors
+// all functions form beej.us
+// create tcp/udp listener/receiver
 
 // type aliasing functions to avoid conflicts with member functions
 static constexpr auto platform_send = send;
@@ -45,6 +50,8 @@ static constexpr auto platform_ntop = inet_ntop;
 static constexpr auto platform_pton = inet_pton;
 static constexpr auto platform_recvfrom = recvfrom;
 static constexpr auto platform_sendto = sendto;
+static constexpr auto platform_getsockname = getsockname;
+static constexpr auto platform_shutdown = shutdown;
 
 /**
  * Wrapper for system sockets with utility functions.
@@ -262,6 +269,8 @@ public:
 
     ~Socket();
 
+    [[nodiscard]] int get_fd() const noexcept;
+
     void bind(const Socket::Address &address) const;
 
     void connect(const Socket::Address &address) const;
@@ -306,14 +315,27 @@ public:
     std::pair<Address, std::vector<T>>
     receive_to_end_from(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const;
 
+    enum class ShutdownType {
+        READ = SHUT_RD,
+        WRITE = SHUT_WR,
+        ALL = SHUT_RDWR
+    };
+
+    void shutdown(ShutdownType type) const;
+
     void close();
 
     template<typename T>
-    void setOption(int option, T value);
+    void set_option(int option, T value);
 
-    [[nodiscard]] Socket::Address getPeerName() const;
+    template<typename T>
+    T get_option(int option);
 
-    // #TODO get option
+    [[nodiscard]] Socket::Address get_peer_address() const;
+
+    [[nodiscard]] Socket::Address get_address() const;
+
+
 
     static std::vector<AddressInformation>
     getAddressInfo(std::string_view address, std::string_view port, int family = 0, int type = 0, int protocol = 0,
@@ -573,15 +595,19 @@ std::pair<Socket::Address, std::vector<T>> Socket::receive_to_end_from(int buffe
 }
 
 inline void Socket::close() {
-    // #TODO check for error
     if (mFileDescriptor != -1) {
-        platform_close(mFileDescriptor);
+        int status = platform_close(mFileDescriptor);
+
         mFileDescriptor = -1;
+
+        if (status == -1) {
+            throw Socket::Error(strerror(errno));
+        }
     }
 }
 
 template<typename T>
-inline void Socket::setOption(int option, T value) {
+inline void Socket::set_option(int option, T value) {
     int status = platform_setsockopt(mFileDescriptor, SOL_SOCKET, option, &value, sizeof(T));
     if (status == -1) {
         throw Socket::Error(strerror(errno));
@@ -652,7 +678,7 @@ Socket::createServer(std::string_view address, std::string_view port, int family
             Socket socket{addressInfo.getFamily(), addressInfo.getType(), addressInfo.getProtocol()};
 
             if (reusePort) {
-                socket.setOption(SO_REUSEADDR, 1);
+                socket.set_option(SO_REUSEADDR, 1);
             }
 
             socket.bind(addressInfo.getAddress());
@@ -679,11 +705,10 @@ inline Socket::NameInfo Socket::getNameInfo(const Socket::Address &address, int 
     return {host, service};
 }
 
-inline Socket::Address Socket::getPeerName() const {
+inline Socket::Address Socket::get_peer_address() const {
     Socket::Address address{};
-    sockaddr *addr = address.get_ptr();
-    socklen_t addrSize = sizeof(*addr);
-    int status = platform_getpeername(mFileDescriptor, addr, &addrSize);
+    socklen_t sock_addr_length = address.get_ptr_length();
+    int status = platform_getpeername(mFileDescriptor, address.get_ptr(), &sock_addr_length);
     if (status == -1) {
         throw Socket::Error(strerror(errno));
     }
@@ -691,5 +716,39 @@ inline Socket::Address Socket::getPeerName() const {
     return address;
 }
 
+Socket::Address Socket::get_address() const {
+    Socket::Address address{};
+    socklen_t sock_addr_length = address.get_ptr_length();
+    int status = platform_getsockname(mFileDescriptor, address.get_ptr(), &sock_addr_length);
+    if (status == -1) {
+        throw Socket::Error(strerror(errno));
+    }
+
+    return address;
+}
+
+void Socket::shutdown(ShutdownType type) const {
+    int status = platform_shutdown(mFileDescriptor, static_cast<int>(type));
+    if (status == -1) {
+        throw Socket::Error(strerror(errno));
+    }
+}
+
+int Socket::get_fd() const noexcept {
+    return mFileDescriptor;
+}
+
+template<typename T>
+T Socket::get_option(int option) {
+    T value;
+    size_t size = sizeof(T);
+    int status = platform_getsockopt(mFileDescriptor, SOL_SOCKET, option, &value, &size);
+
+    if (status == -1) {
+        throw Socket::Error(strerror(errno));
+    }
+
+    return value;
+}
 
 #endif //BROWSER_SOCKET_H
