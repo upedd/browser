@@ -7,6 +7,19 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
+#ifdef USE_EXPECTED_POLYFILL
+#include "include/expected.hpp"
+
+// workaround!
+namespace std {
+    using namespace tl; // NOLINT(cert-dcl58-cpp)
+}
+#else
+
+#include <expected>
+
+#endif
+
 #include <cstring>
 #include <cerrno>
 #include <unistd.h>
@@ -18,9 +31,8 @@
 #include <utility>
 #include <variant>
 #include <memory>
-#include <expected>
+#include <system_error>
 
-// #TODO is it correct?
 #include "cerrno"
 
 int errno;
@@ -28,9 +40,6 @@ int errno;
 // #TODO windows support
 // #TODO support for msghdr?
 // refactor address
-// refactor errors
-// all functions form beej.us
-// create tcp/udp listener/receiver
 
 // type aliasing functions to avoid conflicts with member functions
 static constexpr auto platform_send = send;
@@ -60,8 +69,11 @@ static constexpr auto platform_shutdown = shutdown;
 class Socket {
 public:
     class Address;
+
     class InternetAddress;
+
     class InternetAddressV4;
+
     class InternetAddressV6;
 
     // #TODO more getters and setters for internet addresses.
@@ -86,6 +98,10 @@ public:
 
         [[nodiscard]] sockaddr *get_ptr() const {
             return reinterpret_cast<sockaddr *>(m_storage);
+        }
+
+        [[nodiscard]] inline constexpr static size_t get_size() noexcept {
+            return sizeof(sockaddr_storage);
         }
 
         [[nodiscard]] socklen_t get_ptr_length() const {
@@ -124,6 +140,7 @@ public:
                 delete m_storage;
             }
         }
+
     private:
         sockaddr_storage *m_storage;
         bool m_is_owner;
@@ -144,23 +161,23 @@ public:
         using InternetAddress::InternetAddress;
 
         InternetAddressV4(std::string_view address, uint16_t port) : InternetAddress() {
-            sockaddr_in* inet_ptr = get_inet_ptr();
+            sockaddr_in *inet_ptr = get_inet_ptr();
             inet_ptr->sin_port = port;
             int status = platform_pton(AF_INET, address.data(), &inet_ptr->sin_addr);
 
             if (status == -1) {
-                throw Socket::Error(strerror(errno));
+                throw Socket::Error(errno, std::system_category());
             }
         }
 
         std::string get_as_string() override {
             char buffer[INET_ADDRSTRLEN];
             platform_ntop(AF_INET, &get_inet_ptr()->sin_addr, buffer, INET_ADDRSTRLEN);
-            return { buffer };
+            return {buffer};
         }
 
-        [[nodiscard]] sockaddr_in* get_inet_ptr() const {
-            return reinterpret_cast<sockaddr_in*>(get_ptr());
+        [[nodiscard]] sockaddr_in *get_inet_ptr() const {
+            return reinterpret_cast<sockaddr_in *>(get_ptr());
         }
     };
 
@@ -169,25 +186,26 @@ public:
         using InternetAddress::InternetAddress;
 
         InternetAddressV6(std::string_view address, uint16_t port) : InternetAddress() {
-            sockaddr_in6* inet6_ptr = get_inet6_ptr();
+            sockaddr_in6 *inet6_ptr = get_inet6_ptr();
             inet6_ptr->sin6_port = port;
             int status = platform_pton(AF_INET6, address.data(), &inet6_ptr->sin6_addr);
 
             if (status == -1) {
-                throw Socket::Error(strerror(errno));
+                throw Socket::Error(errno, std::system_category());
             }
         }
 
         std::string get_as_string() override {
             char buffer[INET6_ADDRSTRLEN];
             platform_ntop(AF_INET6, &get_inet6_ptr()->sin6_addr, buffer, INET6_ADDRSTRLEN);
-            return { buffer };
+            return {buffer};
         }
 
-        [[nodiscard]] sockaddr_in6* get_inet6_ptr() const {
-            return reinterpret_cast<sockaddr_in6*>(get_ptr());
+        [[nodiscard]] sockaddr_in6 *get_inet6_ptr() const {
+            return reinterpret_cast<sockaddr_in6 *>(get_ptr());
         }
     };
+
     /**
      * Wrapper around addrinfo pointer.
      * Stores information about only one address info, and not linked list of addresses like addrinfo struct.
@@ -242,9 +260,9 @@ public:
         Address mAddress;
     };
 
-    class Error : public std::runtime_error {
+    class Error : public std::system_error {
     public:
-        explicit Error(const char *error) : std::runtime_error(error) {};
+        using std::system_error::system_error;
     };
 
 
@@ -252,8 +270,9 @@ public:
     static constexpr std::size_t DEFAULT_MAX_BUFFER_SIZE = 1024;
 
     // temp fix protocol should be defaulted to 0
-    Socket(int fileDescriptor, int family, int type, int protocol) : mFileDescriptor(fileDescriptor), mFamily(family),
-                                                                     mType(type), mProtocol(protocol) {};
+    Socket(int fileDescriptor, int family, int type, int protocol) noexcept: fd_(fileDescriptor),
+                                                                             family_(family),
+                                                                             type_(type), protocol_(protocol) {};
 
     Socket(int family, int type, int protocol);
 
@@ -263,57 +282,64 @@ public:
     Socket &operator=(const Socket &) = delete;
 
     // Enable moving
-    Socket(Socket &&socket) noexcept: mFileDescriptor(std::exchange(socket.mFileDescriptor, -1)),
-                                      mType(socket.mType), mFamily(socket.mFamily),
-                                      mProtocol(socket.mProtocol) {};
+    Socket(Socket &&socket) noexcept: fd_(std::exchange(socket.fd_, -1)),
+                                      type_(socket.type_), family_(socket.family_),
+                                      protocol_(socket.protocol_) {};
 
     ~Socket();
 
-    [[nodiscard]] int get_fd() const noexcept;
+    [[nodiscard]] inline int get_fd() const noexcept;
 
-    void bind(const Socket::Address &address) const;
+    [[nodiscard]] inline std::expected<void, Error> bind(const Socket::Address &address) const noexcept;
 
-    void connect(const Socket::Address &address) const;
+    [[nodiscard]] inline std::expected<void, Error> connect(const Socket::Address &address) const noexcept;
 
     // default max backlog?
-    void listen(int maxBacklog = 10) const;
+    [[nodiscard]] inline std::expected<void, Socket::Error> listen(int maxBacklog = 10) const noexcept;
 
-    [[nodiscard]] std::pair<Socket, Socket::Address> accept() const;
-
-    template<typename T>
-    requires std::ranges::sized_range<T>
-    int64_t send(const T &range, int flags = 0) const;
+    [[nodiscard]] inline std::expected<std::pair<Socket, Socket::Address>, Error> accept() const noexcept;
 
     template<typename T>
     requires std::ranges::sized_range<T>
-    int64_t send_to(const Socket::Address &address, const T &range, int flags = 0) const;
+    [[nodiscard]] inline std::expected<int, Error> send(const T &range, int flags = 0) const noexcept;
 
     template<typename T>
     requires std::ranges::sized_range<T>
-    void send_all(const T &range, int flags = 0) const;
+    [[nodiscard]] inline std::expected<int, Error>
+    send_to(const Socket::Address &address, const T &range, int flags = 0) const noexcept;
 
     template<typename T>
     requires std::ranges::sized_range<T>
-    void send_all_to(const Socket::Address &address, const T &range, int flags = 0) const;
+    [[nodiscard]] inline std::expected<void, Error> send_all(const T &range, int flags = 0) const noexcept;
 
     template<typename T>
-    std::vector<T> receive(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const;
+    requires std::ranges::sized_range<T>
+    [[nodiscard]] inline std::expected<void, Error>
+    send_all_to(const Socket::Address &address, const T &range, int flags = 0) const noexcept;
+
+    template<typename T>
+    [[nodiscard]] inline std::expected<std::vector<T>, Socket::Error>
+    receive(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const noexcept;
 
     template<typename T, size_t size>
-    int64_t receive_into(const std::array<T, size> &buffer, int flags) const;
+    [[nodiscard]] inline std::expected<int64_t, Socket::Error>
+    receive_into(const std::array<T, size> &buffer, int flags) const noexcept;
 
     template<typename T>
-    std::pair<Address, std::vector<T>> receive_from(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const;
+    [[nodiscard]] inline std::expected<std::pair<Address, std::vector<T>>, Socket::Error>
+    receive_from(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const noexcept;
 
     template<typename T, size_t size>
-    std::pair<Address, int64_t> receive_from_into(const std::array<T, size> &buffer, int flags) const;
+    [[nodiscard]] inline std::expected<std::pair<Address, int64_t>, Socket::Error>
+    receive_from_into(const std::array<T, size> &buffer, int flags) const noexcept;
 
     template<typename T>
-    std::vector<T> receive_to_end(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const;
+    [[nodiscard]] inline std::expected<std::vector<T>, Socket::Error>
+    receive_to_end(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const noexcept;
 
     template<typename T>
-    std::pair<Address, std::vector<T>>
-    receive_to_end_from(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const;
+    [[nodiscard]] inline std::expected<std::pair<Address, std::vector<T>>, Socket::Error>
+    receive_to_end_from(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const noexcept;
 
     enum class ShutdownType {
         READ = SHUT_RD,
@@ -321,142 +347,156 @@ public:
         ALL = SHUT_RDWR
     };
 
-    void shutdown(ShutdownType type) const;
+    [[nodiscard]] inline std::expected<void, Socket::Error> shutdown(ShutdownType type) const noexcept;
 
-    void close();
-
-    template<typename T>
-    void set_option(int option, T value);
+    [[nodiscard]] inline std::expected<void, Socket::Error> close() noexcept;
 
     template<typename T>
-    T get_option(int option);
+    [[nodiscard]] inline std::expected<void, Socket::Error> set_option(int option, T value) noexcept;
 
-    [[nodiscard]] Socket::Address get_peer_address() const;
+    template<typename T>
+    [[nodiscard]] inline std::expected<T, Socket::Error> get_option(int option) const noexcept;
 
-    [[nodiscard]] Socket::Address get_address() const;
+    [[nodiscard]] inline std::expected<Socket::Address, Socket::Error> get_peer_address() const noexcept;
+
+    [[nodiscard]] inline std::expected<Socket::Address, Socket::Error> get_address() const noexcept;
 
 
+    // #TODO codes
+    class AddressInfoError : public std::runtime_error { ;
+    public:
+        AddressInfoError(auto message, int code) : std::runtime_error(message), code_(code) {}
 
-    static std::vector<AddressInformation>
-    getAddressInfo(std::string_view address, std::string_view port, int family = 0, int type = 0, int protocol = 0,
-                   int flags = 0);
+        [[nodiscard]] inline int get_code() const noexcept {
+            return code_;
+        }
+
+    private:
+        int code_;
+    };
+
+    [[nodiscard]] static inline std::expected<std::vector<AddressInformation>, Socket::AddressInfoError>
+    get_address_info(std::string_view address, std::string_view port, int family = 0, int type = 0, int protocol = 0,
+                     int flags = 0) noexcept;
 
     class NameInfo {
     public:
-        NameInfo(std::string mHost, std::string mService) : mHost(std::move(mHost)), mService(std::move(mService)) {}
+        NameInfo(std::string host, std::string service) : host_(std::move(host)), service_(std::move(service)) {}
 
-        // it this needed?
-        NameInfo(NameInfo &&nameInfo) noexcept: mHost(nameInfo.mHost), mService(nameInfo.mService) {};
+        [[nodiscard]] const std::string &get_host() const noexcept {
+            return host_;
+        }
 
-        const std::string mHost;
-        const std::string mService;
+        [[nodiscard]] const std::string &get_service() const noexcept {
+            return service_;
+        }
+
+    private:
+        const std::string host_;
+        const std::string service_;
     };
 
-    static NameInfo getNameInfo(const Socket::Address &address, int flags = 0);
-
-    static Socket createConnection(int type, std::string_view address, int port);
-
-    static Socket createConnection(int type, std::string_view address, std::string_view port);
-
-    static Socket
-    createServer(std::string_view address, std::string_view port, int family = AF_INET, int type = SOCK_STREAM,
-                 bool reusePort = false, bool dualStackIpv6 = false);
+    static inline std::expected<Socket::NameInfo, Socket::Error>
+    get_name_info(const Socket::Address &address, int flags = 0) noexcept;
 
 private:
-    int mFileDescriptor;
-    int mFamily;
-    int mType;
-    int mProtocol;
+    int fd_;
+    int family_;
+    int type_;
+    int protocol_;
+
+    static inline std::unexpected<Socket::Error> make_unexpected_() {
+        return std::unexpected(Socket::Error(errno, std::system_category()));
+    }
+
+    template<typename T>
+    static inline std::expected<T, Socket::Error> make_response_(int status, T value) noexcept {
+        if (status < 0) {
+            return make_unexpected_();
+        }
+        return {std::forward<T>(value)};
+    }
+
+
+    static inline std::expected<void, Socket::Error> make_response_(int status) {
+        if (status < 0) {
+            return make_unexpected_();
+        }
+        return {};
+    }
 };
 
 inline Socket::Socket(int family, int type, int protocol) {
-    mFileDescriptor = platform_socket(family, type, protocol);
-    if (mFileDescriptor == -1) {
-        throw Socket::Error(strerror(errno));
+    fd_ = platform_socket(family, type, protocol);
+    if (fd_ == -1) {
+        throw Socket::Error(errno, std::system_category());
     }
-    mFamily = family;
-    mType = type;
-    mProtocol = protocol;
+    family_ = family;
+    type_ = type;
+    protocol_ = protocol;
 }
 
 inline Socket::~Socket() {
     close();
 }
 
-inline void Socket::bind(const Socket::Address &address) const {
+inline std::expected<void, Socket::Error> Socket::bind(const Socket::Address &address) const noexcept {
     sockaddr *sockAddr = address.get_ptr();
-    int status = platform_bind(mFileDescriptor, sockAddr, sockAddr->sa_len);
-    if (status == -1) {
-        throw Socket::Error(strerror(errno));
-    }
+    int status = platform_bind(fd_, sockAddr, sockAddr->sa_len);
+    return make_response_(status);
 }
 
-inline void Socket::connect(const Socket::Address &address) const {
+inline std::expected<void, Socket::Error> Socket::connect(const Socket::Address &address) const noexcept {
     sockaddr *sockAddr = address.get_ptr();
-    int status = platform_connect(mFileDescriptor, sockAddr, sockAddr->sa_len);
-    if (status == -1) {
-        throw Socket::Error(strerror(errno));
-    }
+    int status = platform_connect(fd_, sockAddr, sockAddr->sa_len);
+    return make_response_(status);
 }
 
-inline void Socket::listen(int maxBacklog) const {
-    int status = platform_listen(mFileDescriptor, maxBacklog);
-
-    if (status == -1) {
-        throw Socket::Error(strerror(errno));
-    }
+inline std::expected<void, Socket::Error> Socket::listen(int maxBacklog) const noexcept {
+    int status = platform_listen(fd_, maxBacklog);
+    return make_response_(status);
 }
 
-inline std::pair<Socket, Socket::Address> Socket::accept() const {
+inline std::expected<std::pair<Socket, Socket::Address>, Socket::Error> Socket::accept() const noexcept {
     Socket::Address address;
     sockaddr *sockAddr = address.get_ptr();
-    // we get and pass size of a sockaddr_storage type instead of sockaddr
-    // as the sockaddr is stored as sockaddr_storage in Socket::Address
-    // and to support properly storing ipv6 which requires more storage
-    // we need to tell platform_accept we have space for a larger object
-    socklen_t sockStorageSize = sizeof(sockaddr_storage);
-    int socketFileDescriptor = platform_accept(mFileDescriptor, sockAddr, &sockStorageSize);
+    socklen_t sockStorageSize = Socket::Address::get_size();
+    int socketFileDescriptor = platform_accept(fd_, sockAddr, &sockStorageSize);
 
     if (socketFileDescriptor == -1) {
-        throw Socket::Error(strerror(errno));
+        return make_unexpected_();
     }
 
-    Socket newSocket(socketFileDescriptor, mFamily, mType, mProtocol);
-
-    return {std::move(newSocket), std::move(address)};
+    Socket newSocket(socketFileDescriptor, family_, type_, protocol_);
+    return {{std::move(newSocket), std::move(address)}};
 }
 
 template<typename T>
 requires std::ranges::sized_range<T>
-int64_t Socket::send(const T &range, int flags) const {
+inline std::expected<int, Socket::Error> Socket::send(const T &range, int flags) const noexcept {
     auto data = std::ranges::data(range);
     uint32_t data_size = std::ranges::size(range);
 
-    int bytesSent = platform_send(mFileDescriptor, data, data_size, flags);
-    if (bytesSent == -1) {
-        throw Socket::Error(strerror(errno));
-    }
-    return bytesSent;
+    int bytesSent = platform_send(fd_, data, data_size, flags);
+    return make_response_(bytesSent, bytesSent);
 }
 
 template<typename T>
 requires std::ranges::sized_range<T>
-int64_t Socket::send_to(const Socket::Address &address, const T &range, int flags) const {
+std::expected<int, Socket::Error>
+inline Socket::send_to(const Socket::Address &address, const T &range, int flags) const noexcept {
     auto data = std::ranges::data(range);
     uint32_t data_size = std::ranges::size(range);
 
-    int bytes_sent = platform_sendto(mFileDescriptor, data, data_size, flags, address.get_ptr(),
+    int bytes_sent = platform_sendto(fd_, data, data_size, flags, address.get_ptr(),
                                      address.get_ptr_length());
-    if (bytes_sent == -1) {
-        throw Socket::Error(strerror(errno));
-    }
-    return bytes_sent;
+    return make_response_(bytes_sent, bytes_sent);
 }
 
 
 template<typename T>
 requires std::ranges::sized_range<T>
-void Socket::send_all(const T &range, int flags) const {
+inline std::expected<void, Socket::Error> Socket::send_all(const T &range, int flags) const noexcept {
     auto begin_iter = std::ranges::begin(range);
     auto end_iter = std::ranges::end(range);
 
@@ -464,15 +504,23 @@ void Socket::send_all(const T &range, int flags) const {
     int64_t bytes_left = std::ranges::size(range);
 
     while (total_bytes_sent < bytes_left) {
-        int64_t bytes_sent = send(std::ranges::subrange(begin_iter + total_bytes_sent, end_iter), flags);
+        auto response = send(std::ranges::subrange(begin_iter + total_bytes_sent, end_iter), flags);
+        if (!response) {
+            return std::unexpected(response.error());
+        }
+        int64_t bytes_sent = *response;
+
         total_bytes_sent += bytes_sent;
         bytes_left -= bytes_sent;
     }
+
+    return {};
 }
 
 template<typename T>
 requires std::ranges::sized_range<T>
-void Socket::send_all_to(const Socket::Address &address, const T &range, int flags) const {
+inline std::expected<void, Socket::Error>
+Socket::send_all_to(const Socket::Address &address, const T &range, int flags) const noexcept {
     auto begin_iter = std::ranges::begin(range);
     auto end_iter = std::ranges::end(range);
 
@@ -480,44 +528,49 @@ void Socket::send_all_to(const Socket::Address &address, const T &range, int fla
     int64_t bytes_left = std::ranges::size(range);
 
     while (total_bytes_sent < bytes_left) {
-        int64_t bytes_sent = send_to(address, std::ranges::subrange(begin_iter + total_bytes_sent, end_iter), flags);
+        auto response = send_to(address, std::ranges::subrange(begin_iter + total_bytes_sent, end_iter), flags);
+        if (!response) {
+            return std::unexpected(response.error());
+        }
+        int64_t bytes_sent = *response;
+
         total_bytes_sent += bytes_sent;
         bytes_left -= bytes_sent;
     }
+
+    return {};
 }
 
 template<typename T>
-std::vector<T> Socket::receive(int buffer_size, int flags) const {
+inline std::expected<std::vector<T>, Socket::Error> Socket::receive(int buffer_size, int flags) const noexcept {
     std::vector<T> buffer{};
     buffer.resize(buffer_size);
 
     size_t buffer_size_in_bytes = buffer_size * sizeof(T);
-    int bytes_received = platform_recv(mFileDescriptor, buffer.data(), buffer_size_in_bytes, flags);
+    int bytes_received = platform_recv(fd_, buffer.data(), buffer_size_in_bytes, flags);
 
-    if (bytes_received == -1) {
-        throw Socket::Error(strerror(errno));
-    }
-
-    // shrink buffer vector to only fit elements we received
-    size_t num_of_elements_received = bytes_received / sizeof(T);
+    // shrink buffer vector to only fit elements we receive
+    // we need to std::max in case bytes received is negative because it failed
+    size_t num_of_elements_received = bytes_received > 0 ? bytes_received / sizeof(T) : 0ul;
     buffer.resize(num_of_elements_received);
-    return buffer;
+
+    return make_response_(bytes_received, buffer);
 }
 
 
 template<typename T, size_t size>
-int64_t Socket::receive_into(const std::array<T, size> &buffer, int flags) const {
+inline std::expected<int64_t, Socket::Error>
+Socket::receive_into(const std::array<T, size> &buffer, int flags) const noexcept {
     constexpr size_t buffer_size_in_bytes = size * sizeof(T);
-    int bytes_received = platform_recv(mFileDescriptor, buffer.data(), buffer_size_in_bytes, flags);
-    if (bytes_received == -1) {
-        throw Socket::Error(strerror(errno));
-    }
+    int bytes_received = platform_recv(fd_, buffer.data(), buffer_size_in_bytes, flags);
+
     // return num of elements we received
-    return bytes_received / sizeof(T);
+    return make_response_(bytes_received, bytes_received / sizeof(T));
 }
 
 template<typename T>
-std::pair<Socket::Address, std::vector<T>> Socket::receive_from(int buffer_size, int flags) const {
+inline std::expected<std::pair<Socket::Address, std::vector<T>>, Socket::Error>
+Socket::receive_from(int buffer_size, int flags) const noexcept {
     Address address{};
     std::vector<T> buffer{};
     buffer.resize(buffer_size);
@@ -526,48 +579,47 @@ std::pair<Socket::Address, std::vector<T>> Socket::receive_from(int buffer_size,
     // sockaddr_storage instead of sockaddr so we can receive ipv6 addresses
     socklen_t sock_length = sizeof(sockaddr_storage);
 
-    int bytes_received = platform_recvfrom(mFileDescriptor, buffer.data(), buffer_size_in_bytes, flags,
+    int bytes_received = platform_recvfrom(fd_, buffer.data(), buffer_size_in_bytes, flags,
                                            address.get_ptr(), &sock_length);
 
-    if (bytes_received == -1) {
-        throw Socket::Error(strerror(errno));
-    }
-
     // shrink buffer vector to only fit elements we received
-    size_t num_of_elements_received = bytes_received / sizeof(T);
+    size_t num_of_elements_received = bytes_received > 0 ? bytes_received / sizeof(T) : 0ul;
     buffer.resize(num_of_elements_received);
 
-    return std::make_pair(std::move(address), std::move(buffer));
+    return make_response_(bytes_received, std::make_pair(std::move(address), std::move(buffer)));
 }
 
 
 template<typename T, size_t size>
-std::pair<Socket::Address, int64_t> Socket::receive_from_into(const std::array<T, size> &buffer, int flags) const {
+inline std::expected<std::pair<Socket::Address, int64_t>, Socket::Error>
+Socket::receive_from_into(const std::array<T, size> &buffer, int flags) const noexcept {
     constexpr size_t buffer_size_in_bytes = size * sizeof(T);
 
     Socket::Address address{};
     // sockaddr_storage instead of sockaddr so we can receive ipv6 addresses
     socklen_t sock_length = sizeof(sockaddr_storage);
 
-    int bytes_received = platform_recv_from(mFileDescriptor, buffer.data(), buffer_size_in_bytes, flags,
+    int bytes_received = platform_recv_from(fd_, buffer.data(), buffer_size_in_bytes, flags,
                                             address.get_ptr(), &sock_length);
-    if (bytes_received == -1) {
-        throw Socket::Error(strerror(errno));
-    }
+
 
     size_t num_of_elements_received = bytes_received / sizeof(T);
 
-    return std::make_pair(std::move(address), num_of_elements_received);
+    return make_response_(bytes_received, std::make_pair(std::move(address), num_of_elements_received));
 }
 
 template<typename T>
-std::vector<T> Socket::receive_to_end(int buffer_size, int flags) const {
+inline std::expected<std::vector<T>, Socket::Error> Socket::receive_to_end(int buffer_size, int flags) const noexcept {
     std::vector<T> result_buffer;
     while (true) {
         auto buffer = receive<T>(buffer_size, flags);
+
+        if (!buffer) {
+            return std::unexpected(buffer.error());
+        }
         // we receive until we get an empty buffer which means there so more data to read
-        if (buffer.size() > 0) {
-            result_buffer.insert(result_buffer.end(), buffer.begin(), buffer.end());
+        if ((*buffer).size() > 0) {
+            result_buffer.insert(result_buffer.end(), (*buffer).begin(), (*buffer).end());
         } else {
             break;
         }
@@ -576,11 +628,17 @@ std::vector<T> Socket::receive_to_end(int buffer_size, int flags) const {
 }
 
 template<typename T>
-std::pair<Socket::Address, std::vector<T>> Socket::receive_to_end_from(int buffer_size, int flags) const {
+inline std::expected<std::pair<Socket::Address, std::vector<T>>, Socket::Error>
+Socket::receive_to_end_from(int buffer_size, int flags) const noexcept {
     std::vector<T> result_buffer;
     Socket::Address last_address;
     while (true) {
-        auto [buffer, address] = receive<T>(buffer_size, flags);
+        auto response = receive<T>(buffer_size, flags);
+        if (!response) {
+            return std::unexpected(response.error());
+        }
+
+        auto [buffer, address] = *response;
         // we receive until we get an empty buffer which means there so more data to read
         if (buffer.size() > 0) {
             result_buffer.insert(result_buffer.end(), buffer.begin(), buffer.end());
@@ -594,28 +652,24 @@ std::pair<Socket::Address, std::vector<T>> Socket::receive_to_end_from(int buffe
     return std::make_pair(std::move(last_address), std::move(result_buffer));
 }
 
-inline void Socket::close() {
-    if (mFileDescriptor != -1) {
-        int status = platform_close(mFileDescriptor);
-
-        mFileDescriptor = -1;
-
-        if (status == -1) {
-            throw Socket::Error(strerror(errno));
-        }
+inline std::expected<void, Socket::Error> Socket::close() noexcept {
+    if (fd_ != -1) {
+        int status = platform_close(fd_);
+        fd_ = -1;
+        return make_response_(status);
     }
+    return {};
 }
 
 template<typename T>
-inline void Socket::set_option(int option, T value) {
-    int status = platform_setsockopt(mFileDescriptor, SOL_SOCKET, option, &value, sizeof(T));
-    if (status == -1) {
-        throw Socket::Error(strerror(errno));
-    }
+inline std::expected<void, Socket::Error> Socket::set_option(int option, T value) noexcept {
+    int status = platform_setsockopt(fd_, SOL_SOCKET, option, &value, sizeof(T));
+    return make_response_(status);
 }
 
-inline std::vector<Socket::AddressInformation>
-Socket::getAddressInfo(std::string_view address, std::string_view port, int family, int type, int protocol, int flags) {
+inline std::expected<std::vector<Socket::AddressInformation>, Socket::AddressInfoError>
+Socket::get_address_info(std::string_view address, std::string_view port, int family, int type, int protocol,
+                         int flags) noexcept {
     addrinfo hints{flags, // flags
                    family, // family
                    type, // type
@@ -628,8 +682,9 @@ Socket::getAddressInfo(std::string_view address, std::string_view port, int fami
     addrinfo *response;
 
     int status = platform_getaddrinfo(address.data(), port.data(), &hints, &response);
+
     if (status != 0) {
-        throw Socket::Error(gai_strerror(status));
+        return std::unexpected(Socket::AddressInfoError(gai_strerror(status), status));
     }
 
     std::vector<AddressInformation> addresses;
@@ -643,112 +698,47 @@ Socket::getAddressInfo(std::string_view address, std::string_view port, int fami
     return addresses;
 }
 
-inline Socket Socket::createConnection(int type, std::string_view address, int port) {
-    return createConnection(type, address, std::to_string(port));
-}
 
-inline Socket Socket::createConnection(int type, std::string_view address, std::string_view port) {
-    auto response = getAddressInfo(address, port, AF_UNSPEC, type);
-    for (auto &addressInformation: response) {
-        try {
-            Socket currentSocket(
-                    addressInformation.getFamily(),
-                    addressInformation.getType(),
-                    addressInformation.getProtocol()
-            );
-            currentSocket.connect(addressInformation.getAddress());
-            // no errors thrown mean we got a connection
-            return currentSocket;
-        } catch (const Socket::Error &error) {
-            // connection failed -> debug log?
-        }
-    }
-    throw Socket::Error("Couldn't create a connection!");
-}
-
-inline Socket
-Socket::createServer(std::string_view address, std::string_view port, int family, int type, bool reusePort,
-                     bool dualStackIpv6) {
-    // #TODO dual stack
-
-    auto addresses = Socket::getAddressInfo(address, port, family, type, 0, AI_PASSIVE);
-
-    for (auto &addressInfo: addresses) {
-        try {
-            Socket socket{addressInfo.getFamily(), addressInfo.getType(), addressInfo.getProtocol()};
-
-            if (reusePort) {
-                socket.set_option(SO_REUSEADDR, 1);
-            }
-
-            socket.bind(addressInfo.getAddress());
-            // no errors mean we got successfully bound socket
-            return socket;
-        } catch (const Socket::Error &error) {
-            // debug log?
-        }
-    }
-
-    throw Socket::Error("Failed to bind");
-}
-
-inline Socket::NameInfo Socket::getNameInfo(const Socket::Address &address, int flags) {
+inline std::expected<Socket::NameInfo, Socket::Error>
+Socket::get_name_info(const Socket::Address &address, int flags) noexcept {
     char host[1024];
     char service[20];
     sockaddr *addr = address.get_ptr();
 
     int status = platform_getnameinfo(addr, sizeof(*addr), host, sizeof(host), service, sizeof(service), flags);
-    if (status == -1) {
-        throw Socket::Error(strerror(errno));
-    }
-
-    return {host, service};
+    return make_response_<Socket::NameInfo>(status, {host, service});
 }
 
-inline Socket::Address Socket::get_peer_address() const {
+inline std::expected<Socket::Address, Socket::Error> Socket::get_peer_address() const noexcept {
     Socket::Address address{};
-    socklen_t sock_addr_length = address.get_ptr_length();
-    int status = platform_getpeername(mFileDescriptor, address.get_ptr(), &sock_addr_length);
-    if (status == -1) {
-        throw Socket::Error(strerror(errno));
-    }
-
-    return address;
+    socklen_t sock_addr_length = Socket::Address::get_size();
+    int status = platform_getpeername(fd_, address.get_ptr(), &sock_addr_length);
+    return make_response_(status, std::move(address));
 }
 
-Socket::Address Socket::get_address() const {
+inline std::expected<Socket::Address, Socket::Error> Socket::get_address() const noexcept {
     Socket::Address address{};
-    socklen_t sock_addr_length = address.get_ptr_length();
-    int status = platform_getsockname(mFileDescriptor, address.get_ptr(), &sock_addr_length);
-    if (status == -1) {
-        throw Socket::Error(strerror(errno));
-    }
-
-    return address;
+    socklen_t sock_addr_length = Socket::Address::get_size();
+    int status = platform_getsockname(fd_, address.get_ptr(), &sock_addr_length);
+    return make_response_(status, std::move(address));
 }
 
-void Socket::shutdown(ShutdownType type) const {
-    int status = platform_shutdown(mFileDescriptor, static_cast<int>(type));
-    if (status == -1) {
-        throw Socket::Error(strerror(errno));
-    }
+inline std::expected<void, Socket::Error> Socket::shutdown(ShutdownType type) const noexcept {
+    int status = platform_shutdown(fd_, static_cast<int>(type));
+    return make_response_(status);
 }
 
-int Socket::get_fd() const noexcept {
-    return mFileDescriptor;
+inline int Socket::get_fd() const noexcept {
+    return fd_;
 }
 
 template<typename T>
-T Socket::get_option(int option) {
+inline std::expected<T, Socket::Error> Socket::get_option(int option) const noexcept {
     T value;
     size_t size = sizeof(T);
-    int status = platform_getsockopt(mFileDescriptor, SOL_SOCKET, option, &value, &size);
+    int status = platform_getsockopt(fd_, SOL_SOCKET, option, &value, &size);
 
-    if (status == -1) {
-        throw Socket::Error(strerror(errno));
-    }
-
-    return value;
+    return make_response_(status, value);
 }
 
 #endif //BROWSER_SOCKET_H
