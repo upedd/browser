@@ -39,7 +39,7 @@ int errno;
 
 // #TODO windows support
 // #TODO support for msghdr?
-// refactor address
+// #TODO addresses error handling
 
 // type aliasing functions to avoid conflicts with member functions
 static constexpr auto platform_send = send;
@@ -80,9 +80,9 @@ public:
 
     class Address {
     public:
-        Address() : m_storage(new sockaddr_storage), m_is_owner(true) {};
+        Address() : storage_(new sockaddr_storage), is_owner_(true) {};
 
-        explicit Address(sockaddr_storage *storage, bool transfer_ownership = false) : m_storage(storage), m_is_owner(
+        explicit Address(sockaddr_storage *storage, bool transfer_ownership = false) : storage_(storage), is_owner_(
                 transfer_ownership) {};
 
         explicit Address(sockaddr *storage, bool transfer_ownership = false) : Address(
@@ -93,11 +93,11 @@ public:
 
         Address &operator=(const Address &) = delete;
 
-        Address(Address &&address) noexcept: m_storage(std::exchange(address.m_storage, nullptr)),
-                                             m_is_owner(std::exchange(address.m_is_owner, false)) {}
+        Address(Address &&address) noexcept: storage_(std::exchange(address.storage_, nullptr)),
+                                             is_owner_(std::exchange(address.is_owner_, false)) {}
 
         [[nodiscard]] sockaddr *get_ptr() const {
-            return reinterpret_cast<sockaddr *>(m_storage);
+            return reinterpret_cast<sockaddr *>(storage_);
         }
 
         [[nodiscard]] inline constexpr static size_t get_size() noexcept {
@@ -105,11 +105,11 @@ public:
         }
 
         [[nodiscard]] socklen_t get_ptr_length() const {
-            return m_storage->ss_len;
+            return storage_->ss_len;
         }
 
         [[nodiscard]] uint8_t get_family() const {
-            return m_storage->ss_family;
+            return storage_->ss_family;
         }
 
         [[nodiscard]] std::unique_ptr<InternetAddress> get_as_inet() const {
@@ -123,27 +123,27 @@ public:
 
         [[nodiscard]] std::unique_ptr<InternetAddressV4> get_as_v4() const {
             if (get_family() == AF_INET) {
-                return std::make_unique<InternetAddressV4>(get_ptr());
+                return std::make_unique<InternetAddressV4>(storage_);
             }
             return {};
         };
 
         [[nodiscard]] std::unique_ptr<InternetAddressV6> get_as_v6() const {
             if (get_family() == AF_INET6) {
-                return std::make_unique<InternetAddressV6>(get_ptr());
+                return std::make_unique<InternetAddressV6>(storage_);
             }
             return {};
         };
 
         ~Address() {
-            if (m_is_owner) {
-                delete m_storage;
+            if (is_owner_) {
+                delete storage_;
             }
         }
 
     private:
-        sockaddr_storage *m_storage;
-        bool m_is_owner;
+        sockaddr_storage *storage_;
+        bool is_owner_;
     };
 
     class InternetAddress : public Address {
@@ -152,7 +152,6 @@ public:
 
         virtual std::string get_as_string() = 0;
 
-        // #TODO investigate destruction
         virtual ~InternetAddress() = default;
     };
 
@@ -206,6 +205,23 @@ public:
         }
     };
 
+    enum class Family {
+        UNSPECIFIED = AF_UNSPEC,
+        IPV4 = AF_INET,
+        IPV6 = AF_INET6,
+    };
+
+    enum class Type {
+        STREAM = SOCK_STREAM,
+        DGRAM = SOCK_DGRAM
+    };
+
+    enum class Protocol {
+        AUTO = 0,
+        TCP = IPPROTO_TCP,
+        UDP = IPPROTO_UDP
+    };
+
     /**
      * Wrapper around addrinfo pointer.
      * Stores information about only one address info, and not linked list of addresses like addrinfo struct.
@@ -214,50 +230,49 @@ public:
     class AddressInformation {
 
     public:
-        explicit AddressInformation(addrinfo *addrInfo) : mAddrInfo(addrInfo), mAddress(addrInfo->ai_addr) {};
+        explicit AddressInformation(addrinfo *address_info) noexcept : address_info_(address_info), address_(address_info->ai_addr) {};
 
         // disable copying
-        AddressInformation(const AddressInformation &addressInformation) = delete;
+        AddressInformation(const AddressInformation&_) = delete;
 
         AddressInformation &operator=(const AddressInformation &) = delete;
 
         // move constructor
-        AddressInformation(AddressInformation &&addressInformation) noexcept: mAddrInfo(
-                std::exchange(addressInformation.mAddrInfo, nullptr)),
-                                                                              mAddress(std::move(
-                                                                                      addressInformation.mAddress)) {}
+        AddressInformation(AddressInformation &&addressInformation) noexcept:
+            address_info_(std::exchange(addressInformation.address_info_, nullptr)),
+            address_(std::move(addressInformation.address_)) {}
 
         ~AddressInformation() {
-            if (mAddrInfo) {
+            if (address_info_) {
                 // we want to delete only our object and not entire linked list of objects.
-                mAddrInfo->ai_next = nullptr;
-                freeaddrinfo(mAddrInfo);
+                address_info_->ai_next = nullptr;
+                freeaddrinfo(address_info_);
             }
         }
 
-        [[nodiscard]] int getFamily() const {
-            return mAddrInfo->ai_family;
+        [[nodiscard]] inline Socket::Family get_family() const noexcept {
+            return Socket::Family { address_info_->ai_family };
         }
 
-        [[nodiscard]] int getType() const {
-            return mAddrInfo->ai_socktype;
+        [[nodiscard]] inline Socket::Type get_type() const noexcept {
+            return Socket::Type { address_info_->ai_socktype };
         }
 
-        [[nodiscard]] int getProtocol() const {
-            return mAddrInfo->ai_protocol;
+        [[nodiscard]] inline Socket::Protocol get_protocol() const noexcept {
+            return Socket::Protocol { address_info_->ai_protocol };
         }
 
-        [[nodiscard]] const char *getCanonicalName() const {
-            return mAddrInfo->ai_canonname;
+        [[nodiscard]] inline std::string_view get_canonical_name() const noexcept {
+            return address_info_->ai_canonname;
         }
 
-        [[nodiscard]] const Address &getAddress() const {
-            return mAddress;
+        [[nodiscard]] inline const Address& get_address() const noexcept {
+            return address_;
         }
 
     private:
-        addrinfo *mAddrInfo;
-        Address mAddress;
+        addrinfo *address_info_;
+        Address address_;
     };
 
     class Error : public std::system_error {
@@ -265,16 +280,25 @@ public:
         using std::system_error::system_error;
     };
 
-
     // #TODO check other implementations
     static constexpr std::size_t DEFAULT_MAX_BUFFER_SIZE = 1024;
 
     // temp fix protocol should be defaulted to 0
-    Socket(int fileDescriptor, int family, int type, int protocol) noexcept: fd_(fileDescriptor),
-                                                                             family_(family),
-                                                                             type_(type), protocol_(protocol) {};
+    Socket(int file_descriptor, Family family, Type type, Protocol protocol = Protocol::AUTO) noexcept : fd_(file_descriptor),
+                                                                              family_(family),
+                                                                              type_(type),
+                                                                              protocol_(protocol) {};
 
-    Socket(int family, int type, int protocol);
+    /**
+     * For non-throwing way to creating socket look into Socket::create.
+     * @param family
+     * @param type
+     * @param protocol
+     * @throws Socket::Error
+     */
+    Socket(Family family, Type type, Protocol protocol);
+
+    [[nodiscard]] static inline std::expected<Socket, Socket::Error> create(Family family, Type type, Protocol protocol) noexcept;
 
     // Disable copying
     Socket(const Socket &socket) = delete;
@@ -376,7 +400,7 @@ public:
     };
 
     [[nodiscard]] static inline std::expected<std::vector<AddressInformation>, Socket::AddressInfoError>
-    get_address_info(std::string_view address, std::string_view port, int family = 0, int type = 0, int protocol = 0,
+    get_address_info(std::string_view address, std::string_view port, Family family, Type type, Protocol protocol = Socket::Protocol::AUTO,
                      int flags = 0) noexcept;
 
     class NameInfo {
@@ -401,9 +425,9 @@ public:
 
 private:
     int fd_;
-    int family_;
-    int type_;
-    int protocol_;
+    Family family_;
+    Type type_;
+    Protocol protocol_;
 
     static inline std::unexpected<Socket::Error> make_unexpected_() {
         return std::unexpected(Socket::Error(errno, std::system_category()));
@@ -426,8 +450,8 @@ private:
     }
 };
 
-inline Socket::Socket(int family, int type, int protocol) {
-    fd_ = platform_socket(family, type, protocol);
+inline Socket::Socket(Socket::Family family, Socket::Type type, Socket::Protocol protocol) {
+    fd_ = platform_socket(static_cast<int>(family), static_cast<int>(type), static_cast<int>(protocol));
     if (fd_ == -1) {
         throw Socket::Error(errno, std::system_category());
     }
@@ -668,12 +692,12 @@ inline std::expected<void, Socket::Error> Socket::set_option(int option, T value
 }
 
 inline std::expected<std::vector<Socket::AddressInformation>, Socket::AddressInfoError>
-Socket::get_address_info(std::string_view address, std::string_view port, int family, int type, int protocol,
+Socket::get_address_info(std::string_view address, std::string_view port, Family family, Type type, Protocol protocol,
                          int flags) noexcept {
     addrinfo hints{flags, // flags
-                   family, // family
-                   type, // type
-                   protocol, // protocol, using 0 to automatically get protocol for type
+                   static_cast<int>(family), // family
+                   static_cast<int>(type), // type
+                   static_cast<int>(protocol), // protocol, using 0 to automatically get protocol for type
                    0, // address length
                    nullptr, // canon name
                    nullptr, // address
@@ -730,6 +754,14 @@ inline std::expected<void, Socket::Error> Socket::shutdown(ShutdownType type) co
 
 inline int Socket::get_fd() const noexcept {
     return fd_;
+}
+
+inline std::expected<Socket, Socket::Error> Socket::create(Socket::Family family, Socket::Type type, Socket::Protocol protocol) noexcept {
+    int fd = platform_socket(static_cast<int>(family), static_cast<int>(type), static_cast<int>(protocol));
+    if (fd == -1) {
+        return make_unexpected_();
+    }
+    return Socket {fd, family, type, protocol};
 }
 
 template<typename T>
