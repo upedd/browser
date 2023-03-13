@@ -595,8 +595,8 @@ Socket::receive_into(const std::array<T, size> &buffer, int flags) const noexcep
 template<typename T>
 inline std::expected<std::pair<Socket::Address, std::vector<T>>, Socket::Error>
 Socket::receive_from(int buffer_size, int flags) const noexcept {
-    Address address{};
-    std::vector<T> buffer{};
+    Address address {};
+    std::vector<T> buffer {};
     buffer.resize(buffer_size);
 
     size_t buffer_size_in_bytes = buffer_size * sizeof(T);
